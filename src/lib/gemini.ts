@@ -21,6 +21,7 @@ export const MODELS = {
 export const ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9", "1:4", "1:8", "4:1", "8:1"] as const;
 export const IMAGE_SIZES = ["512px", "1K", "2K", "4K"] as const;
 export const VIDEO_RESOLUTIONS = ["720p", "1080p", "4k"] as const;
+export const VIDEO_FPS = [24, 30, 60] as const;
 export const VIDEO_MODELS = [
   { id: MODELS.VIDEO, name: "Veo Fast (Preview)" },
   { id: MODELS.VIDEO_PRO, name: "Veo Pro (Preview)" },

@@ -35,24 +35,30 @@ async function startServer() {
       return res.status(500).json({ error: "GITHUB_CLIENT_ID not configured" });
     }
 
-    const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/auth/github/callback`;
+    const redirectUri = `${process.env.APP_URL}/auth/github/callback`;
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
       scope: "repo user",
-      state: "random_state_string", // In production, use a secure random string
+      state: "omniagent_auth_state",
     });
 
     res.json({ url: `https://github.com/login/oauth/authorize?${params.toString()}` });
   });
 
   app.get(["/auth/github/callback", "/auth/github/callback/"], async (req, res) => {
-    const { code } = req.query;
+    const { code, state } = req.query;
     if (!code) {
       return res.status(400).send("Missing code");
     }
 
+    // Optional: verify state if you want to be strict
+    // if (state !== "omniagent_auth_state") {
+    //   return res.status(400).send("Invalid state");
+    // }
+
     try {
+      const redirectUri = `${process.env.APP_URL}/auth/github/callback`;
       const response = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
         headers: {
@@ -63,6 +69,7 @@ async function startServer() {
           client_id: process.env.GITHUB_CLIENT_ID,
           client_secret: process.env.GITHUB_CLIENT_SECRET,
           code,
+          redirect_uri: redirectUri,
         }),
       });
 

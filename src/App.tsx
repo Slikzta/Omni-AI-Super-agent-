@@ -7,6 +7,8 @@ import Integrations from './components/Integrations';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
 
+import ErrorBoundary from './components/ErrorBoundary';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('chat');
 
@@ -27,11 +29,13 @@ export default function App() {
   };
 
   return (
-    <TooltipProvider>
-      <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
-        {renderContent()}
-      </Layout>
-      <Toaster position="top-right" theme="dark" />
-    </TooltipProvider>
+    <ErrorBoundary>
+      <TooltipProvider>
+        <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
+          {renderContent()}
+        </Layout>
+        <Toaster position="top-right" theme="dark" />
+      </TooltipProvider>
+    </ErrorBoundary>
   );
 }

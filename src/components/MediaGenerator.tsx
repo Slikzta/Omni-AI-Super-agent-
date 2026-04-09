@@ -1,14 +1,21 @@
 import React, { useState } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../lib/firebase';
-import { getGeminiAI, MODELS, ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS } from '../lib/gemini';
+import { getGeminiAI, MODELS, ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, VIDEO_FPS } from '../lib/gemini';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Loader2, Download, Sparkles, Wand2, Film, Image as ImageIcon } from 'lucide-react';
+import { Loader2, Download, Sparkles, Wand2, Film, Image as ImageIcon, Camera, Palette } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { toast } from 'sonner';
+
+const STYLE_PERSONAS = [
+  { id: 'none', name: 'Raw Prompt', icon: Wand2, suffix: '' },
+  { id: 'photorealistic', name: 'Photorealistic', icon: Camera, suffix: ', hyperrealistic, 8k resolution, cinematic lighting, highly detailed, professional photography, masterpiece, sharp focus, realistic textures' },
+  { id: 'artistic', name: 'Artistic', icon: Palette, suffix: ', digital art, vibrant colors, stylized, creative composition, trending on artstation, sharp details' },
+  { id: 'cinematic', name: 'Cinematic', icon: Film, suffix: ', cinematic shot, movie still, dramatic lighting, anamorphic lens, high contrast, atmospheric' }
+];
 
 export default function MediaGenerator() {
   const [user] = useAuthState(auth);
@@ -24,7 +31,9 @@ export default function MediaGenerator() {
   const [imageSize, setImageSize] = useState<string>("1K");
   const [personGeneration, setPersonGeneration] = useState<string>("ALLOW_ADULT");
   const [resolution, setResolution] = useState<string>("1080p");
-  const [videoModel, setVideoModel] = useState<string>(MODELS.VIDEO);
+  const [fps, setFps] = useState<number>(30);
+  const [videoModel, setVideoModel] = useState<string>(MODELS.VIDEO_PRO);
+  const [selectedStyleId, setSelectedStyleId] = useState<string>('none');
 
   const generateImage = async () => {
     if (!prompt.trim() || isGenerating) return;
@@ -33,9 +42,12 @@ export default function MediaGenerator() {
 
     try {
       const ai = getGeminiAI();
+      const style = STYLE_PERSONAS.find(s => s.id === selectedStyleId);
+      const finalPrompt = prompt + (style?.suffix || '');
+
       const response = await ai.models.generateContent({
         model: MODELS.IMAGE_PRO,
-        contents: { parts: [{ text: prompt }] },
+        contents: { parts: [{ text: finalPrompt }] },
         config: {
           imageConfig: {
             aspectRatio: aspectRatio as any,
@@ -75,7 +87,9 @@ export default function MediaGenerator() {
 
     try {
       const ai = getGeminiAI();
-      
+      const style = STYLE_PERSONAS.find(s => s.id === selectedStyleId);
+      const finalPrompt = prompt + (style?.suffix || '');
+
       // Validate 4K resolution for Lite model
       const finalResolution = (videoModel === MODELS.VIDEO && resolution === '4k') ? '1080p' : resolution;
       if (videoModel === MODELS.VIDEO && resolution === '4k') {
@@ -85,11 +99,12 @@ export default function MediaGenerator() {
       setStatusMessage('Sending prompt to neural network...');
       let operation = await ai.models.generateVideos({
         model: videoModel,
-        prompt: prompt,
+        prompt: finalPrompt,
         config: {
           numberOfVideos: 1,
           resolution: finalResolution as any,
           aspectRatio: aspectRatio as any,
+          fps: fps,
         }
       });
 
@@ -188,7 +203,7 @@ export default function MediaGenerator() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Aspect Ratio</label>
                   <Select value={aspectRatio} onValueChange={setAspectRatio}>
@@ -197,6 +212,25 @@ export default function MediaGenerator() {
                     </SelectTrigger>
                     <SelectContent className="bg-zinc-900 border-zinc-800">
                       {ASPECT_RATIOS.map(r => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Style Persona</label>
+                  <Select value={selectedStyleId} onValueChange={setSelectedStyleId}>
+                    <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-zinc-900 border-zinc-800">
+                      {STYLE_PERSONAS.map(s => (
+                        <SelectItem key={s.id} value={s.id}>
+                          <div className="flex items-center gap-2">
+                            <s.icon className="w-3.5 h-3.5" />
+                            <span>{s.name}</span>
+                          </div>
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -226,6 +260,7 @@ export default function MediaGenerator() {
                         </SelectContent>
                       </Select>
                     </div>
+                    <div className="hidden lg:block" /> {/* Spacer */}
                   </>
                 ) : (
                   <>
@@ -236,7 +271,11 @@ export default function MediaGenerator() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent className="bg-zinc-900 border-zinc-800">
-                          {VIDEO_MODELS.map(m => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+                          {VIDEO_MODELS.map(m => (
+                            <SelectItem key={m.id} value={m.id}>
+                              {m.name}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -251,11 +290,21 @@ export default function MediaGenerator() {
                             <SelectItem 
                               key={r} 
                               value={r}
-                              disabled={videoModel === MODELS.VIDEO && r === '4k'}
                             >
-                              {r} {videoModel === MODELS.VIDEO && r === '4k' ? '(Pro only)' : ''}
+                              {r}
                             </SelectItem>
                           ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">FPS</label>
+                      <Select value={fps.toString()} onValueChange={(v) => setFps(parseInt(v))}>
+                        <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-xl">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-zinc-900 border-zinc-800">
+                          {VIDEO_FPS.map(f => <SelectItem key={f} value={f.toString()}>{f} FPS</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </div>

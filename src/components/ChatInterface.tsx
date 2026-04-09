@@ -35,7 +35,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "./ui/tooltip";
-import { ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, CHAT_MODELS } from '../lib/gemini';
+import { Switch } from "./ui/switch";
+import { ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, CHAT_MODELS, VIDEO_FPS } from '../lib/gemini';
 
 const PERSONAS = [
   {
@@ -231,6 +232,57 @@ function SpeakButton({ text }: { text: string }) {
 
 const MAX_MESSAGE_LENGTH = 4000;
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 export default function ChatInterface() {
   const [user] = useAuthState(auth);
   const [input, setInput] = useState('');
@@ -240,6 +292,7 @@ export default function ChatInterface() {
   const [useSearch, setUseSearch] = useState(true);
   const [useMaps, setUseMaps] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<any>(null);
 
   // Session Management State
@@ -268,6 +321,19 @@ export default function ChatInterface() {
   }, [temperature, topP, topK]);
   const [isParamsOpen, setIsParamsOpen] = useState(false);
   const [isSettingsAnimating, setIsSettingsAnimating] = useState(false);
+  const [streamingContent, setStreamingContent] = useState<string>('');
+  const [streamingMetadata, setStreamingMetadata] = useState<any>(null);
+
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+  const SUPPORTED_TYPES = {
+    'image/*': 'Images (PNG, JPEG, WebP)',
+    'video/*': 'Videos (MP4, MOV, WebM)',
+    'audio/*': 'Audio (MP3, WAV, AAC)',
+    'application/pdf': 'PDF Documents',
+    'text/*': 'Text Files',
+    '.csv': 'CSV Data',
+    '.json': 'JSON Data'
+  };
 
   // Multimodal State
   const [attachments, setAttachments] = useState<{ file: File; preview: string; type: string }[]>([]);
@@ -291,7 +357,8 @@ export default function ChatInterface() {
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   const [videoAspectRatio, setVideoAspectRatio] = useState<string>("16:9");
   const [videoResolution, setVideoResolution] = useState<string>("1080p");
-  const [videoModel, setVideoModel] = useState<string>(MODELS.VIDEO);
+  const [videoFps, setVideoFps] = useState<number>(30);
+  const [videoModel, setVideoModel] = useState<string>(MODELS.VIDEO_PRO);
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
 
   const openImageModal = () => {
@@ -378,6 +445,7 @@ export default function ChatInterface() {
           numberOfVideos: 1,
           aspectRatio: videoAspectRatio as any,
           resolution: videoResolution as any,
+          fps: videoFps,
         }
       });
 
@@ -444,15 +512,22 @@ export default function ChatInterface() {
     }
 
     recognitionRef.current = new SpeechRecognition();
-    recognitionRef.current.continuous = false;
-    recognitionRef.current.interimResults = false;
+    recognitionRef.current.continuous = true;
+    recognitionRef.current.interimResults = true;
     recognitionRef.current.lang = 'en-US';
 
-    recognitionRef.current.onstart = () => setIsListening(true);
-    recognitionRef.current.onend = () => setIsListening(false);
+    recognitionRef.current.onstart = () => {
+      setIsListening(true);
+      setInterimTranscript('');
+    };
+    recognitionRef.current.onend = () => {
+      setIsListening(false);
+      setInterimTranscript('');
+    };
     recognitionRef.current.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
       setIsListening(false);
+      setInterimTranscript('');
       if (event.error === 'not-allowed') {
         toast.error("Microphone access denied.");
       } else {
@@ -461,8 +536,21 @@ export default function ChatInterface() {
     };
 
     recognitionRef.current.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setInput(prev => prev + (prev.length > 0 ? ' ' : '') + transcript);
+      let finalTranscript = '';
+      let currentInterim = '';
+
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          currentInterim += event.results[i][0].transcript;
+        }
+      }
+
+      if (finalTranscript) {
+        setInput(prev => prev + (prev.length > 0 ? ' ' : '') + finalTranscript);
+      }
+      setInterimTranscript(currentInterim);
     };
 
     recognitionRef.current.start();
@@ -480,6 +568,44 @@ export default function ChatInterface() {
     setIsDragging(false);
   };
 
+  const validateAndProcessFile = (file: File) => {
+    const isSupported = 
+      file.type.startsWith('image/') || 
+      file.type.startsWith('video/') || 
+      file.type.startsWith('audio/') || 
+      file.type === 'application/pdf' || 
+      file.type.startsWith('text/') ||
+      file.name.endsWith('.csv') ||
+      file.name.endsWith('.json');
+
+    if (!isSupported) {
+      toast.error(`"${file.name}" is not a supported file type.`, {
+        description: `Supported: ${Object.values(SUPPORTED_TYPES).join(', ')}`
+      });
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      toast.error(`"${file.name}" is too large.`, {
+        description: `Maximum file size is ${MAX_FILE_SIZE / (1024 * 1024)}MB.`
+      });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setAttachments(prev => [...prev, {
+        file,
+        preview: reader.result as string,
+        type: file.type || 'text/plain'
+      }]);
+    };
+    reader.onerror = () => {
+      toast.error(`Failed to read "${file.name}".`);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
@@ -487,19 +613,7 @@ export default function ChatInterface() {
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
-    files.forEach(file => {
-      if (file.type.startsWith('image/') || file.type === 'application/pdf' || file.type.startsWith('text/')) {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          setAttachments(prev => [...prev, {
-            file,
-            preview: reader.result as string,
-            type: file.type
-          }]);
-        };
-        reader.readAsDataURL(file);
-      }
-    });
+    files.forEach(validateAndProcessFile);
   };
 
   const handleFileClick = () => {
@@ -510,17 +624,7 @@ export default function ChatInterface() {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setAttachments(prev => [...prev, {
-          file,
-          preview: reader.result as string,
-          type: file.type
-        }]);
-      };
-      reader.readAsDataURL(file);
-    });
+    files.forEach(validateAndProcessFile);
     
     // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -530,6 +634,26 @@ export default function ChatInterface() {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Persist parameters to Firestore
+  useEffect(() => {
+    if (!user || !sessionId) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        const sessionDocRef = doc(db, `users/${user.uid}/sessions/${sessionId}`);
+        await updateDoc(sessionDocRef, {
+          temperature,
+          topP,
+          topK
+        });
+      } catch (error) {
+        console.error("Error persisting parameters:", error);
+      }
+    }, 1000); // Debounce 1s
+
+    return () => clearTimeout(timer);
+  }, [user, sessionId, temperature, topP, topK]);
+
   // Fetch session title
   useEffect(() => {
     if (!user || !sessionId) return;
@@ -537,11 +661,19 @@ export default function ChatInterface() {
     const sessionDocRef = doc(db, `users/${user.uid}/sessions/${sessionId}`);
     const unsubscribe = onSnapshot(sessionDocRef, (docSnap) => {
       if (docSnap.exists()) {
-        setSessionTitle(docSnap.data().title || "Neural Chat");
+        const data = docSnap.data();
+        setSessionTitle(data.title || "Neural Chat");
+        
+        // Load persisted parameters if they exist
+        if (data.temperature !== undefined) setTemperature(data.temperature);
+        if (data.topP !== undefined) setTopP(data.topP);
+        if (data.topK !== undefined) setTopK(data.topK);
       } else {
         // Initialize session doc if it doesn't exist
         setDoc(sessionDocRef, { title: "Neural Chat", createdAt: serverTimestamp() }, { merge: true });
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/sessions/${sessionId}`);
     });
 
     return () => unsubscribe();
@@ -558,6 +690,8 @@ export default function ChatInterface() {
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatMessage));
       setMessages(msgs);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/sessions/${sessionId}/messages`);
     });
 
     return () => unsubscribe();
@@ -569,6 +703,8 @@ export default function ChatInterface() {
     const q = query(collection(db, `users/${user.uid}/sessions`), orderBy('timestamp', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setSessions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/sessions`);
     });
     return () => unsubscribe();
   }, [user]);
@@ -644,19 +780,20 @@ export default function ChatInterface() {
   }, [messages]);
 
   const handleSend = async () => {
-    if ((!input.trim() && attachments.length === 0) || !user || isLoading || input.length > MAX_MESSAGE_LENGTH) return;
+    const messageText = input.trim();
+    if ((!messageText && attachments.length === 0) || !user || isLoading || messageText.length > MAX_MESSAGE_LENGTH) return;
 
+    const currentAttachments = [...attachments];
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      content: input,
+      content: messageText,
       timestamp: Date.now(),
-      attachments: attachments.map(a => a.preview)
+      attachments: currentAttachments.map(a => a.preview)
     };
 
     setIsLoading(true);
     setInput('');
-    const currentAttachments = [...attachments];
     setAttachments([]);
 
     try {
@@ -678,8 +815,14 @@ export default function ChatInterface() {
           parts: [
             { text: m.content },
             ...(m.attachments || []).map(a => {
-              const [mimeType, data] = a.split(';base64,');
-              return { inlineData: { mimeType: mimeType.split(':')[1], data } };
+              try {
+                const [mimeTypePart, data] = a.split(';base64,');
+                const mimeType = mimeTypePart.split(':')[1];
+                return { inlineData: { mimeType, data } };
+              } catch (e) {
+                console.error("Failed to parse attachment:", a.substring(0, 50));
+                return { text: "[Invalid Attachment]" };
+              }
             })
           ]
         }));
@@ -689,10 +832,11 @@ export default function ChatInterface() {
       contents.push({
         role: 'user',
         parts: [
-          { text: input },
+          { text: messageText },
           ...currentAttachments.map(a => {
-            const [mimeType, data] = a.preview.split(';base64,');
-            return { inlineData: { mimeType: mimeType.split(':')[1], data } };
+            const [mimeTypePart, data] = a.preview.split(';base64,');
+            const mimeType = mimeTypePart.split(':')[1];
+            return { inlineData: { mimeType, data } };
           })
         ]
       });
@@ -711,6 +855,9 @@ export default function ChatInterface() {
       });
 
       let fullContent = "";
+      setStreamingContent("");
+      setStreamingMetadata(null);
+      
       const aiMessageRef = await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), {
         role: 'model',
         content: "",
@@ -718,16 +865,35 @@ export default function ChatInterface() {
         modelName: CHAT_MODELS.find(m => m.id === selectedModelId)?.name || selectedModelId
       });
 
+      let chunkCount = 0;
       for await (const chunk of responseStream) {
         const text = chunk.text;
         if (text) {
           fullContent += text;
-          await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
-            content: fullContent,
-            groundingMetadata: chunk.candidates?.[0]?.groundingMetadata || null
-          });
+          setStreamingContent(fullContent);
+          
+          const metadata = chunk.candidates?.[0]?.groundingMetadata || null;
+          if (metadata) setStreamingMetadata(metadata);
+
+          chunkCount++;
+          // Update Firestore every 5 chunks to reduce overhead
+          if (chunkCount % 5 === 0) {
+            await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
+              content: fullContent,
+              groundingMetadata: metadata
+            });
+          }
         }
       }
+
+      // Final update to Firestore
+      await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
+        content: fullContent,
+        groundingMetadata: streamingMetadata
+      });
+      
+      setStreamingContent("");
+      setStreamingMetadata(null);
     } catch (error) {
       console.error("Chat error:", error);
     } finally {
@@ -757,7 +923,12 @@ export default function ChatInterface() {
                 </div>
                 <div className="text-center">
                   <h3 className="text-xl font-bold text-white">Drop files here</h3>
-                  <p className="text-zinc-400 text-sm mt-1">Images, PDFs, or Text files</p>
+                  <p className="text-zinc-400 text-sm mt-1">
+                    {Object.values(SUPPORTED_TYPES).join(' • ')}
+                  </p>
+                  <p className="text-zinc-500 text-[10px] mt-2 uppercase tracking-widest font-bold">
+                    Max 20MB per file
+                  </p>
                 </div>
               </div>
             </motion.div>
@@ -936,24 +1107,30 @@ export default function ChatInterface() {
             <span className="text-xs hidden md:inline">Clear Chat</span>
           </Button>
           <div className="w-px h-4 bg-zinc-800 mx-1" />
-          <Button 
-            variant="ghost" 
-            size="sm" 
-            onClick={() => setUseSearch(!useSearch)}
-            className={cn("gap-2", useSearch ? "text-blue-400 bg-blue-400/10" : "text-zinc-500")}
-          >
-            <Search className="w-4 h-4" />
-            <span className="text-xs hidden sm:inline">Search</span>
-          </Button>
-          <Button 
-            variant="ghost" 
-            size="sm" 
-            onClick={() => setUseMaps(!useMaps)}
-            className={cn("gap-2", useMaps ? "text-green-400 bg-green-400/10" : "text-zinc-500")}
-          >
-            <MapPin className="w-4 h-4" />
-            <span className="text-xs hidden sm:inline">Maps</span>
-          </Button>
+          <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-zinc-900/30 border border-zinc-800/50">
+            <div className="flex items-center gap-1.5">
+              <Search className={cn("w-3.5 h-3.5 transition-colors", useSearch ? "text-blue-400" : "text-zinc-500")} />
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider hidden sm:inline">Search</span>
+            </div>
+            <Switch 
+              size="sm"
+              checked={useSearch} 
+              onCheckedChange={setUseSearch}
+              className="data-checked:bg-blue-500"
+            />
+          </div>
+          <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-zinc-900/30 border border-zinc-800/50">
+            <div className="flex items-center gap-1.5">
+              <MapPin className={cn("w-3.5 h-3.5 transition-colors", useMaps ? "text-green-400" : "text-zinc-500")} />
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider hidden sm:inline">Maps</span>
+            </div>
+            <Switch 
+              size="sm"
+              checked={useMaps} 
+              onCheckedChange={setUseMaps}
+              className="data-checked:bg-green-500"
+            />
+          </div>
           <div className="w-px h-4 bg-zinc-800 mx-1" />
           <Button 
             variant="ghost" 
@@ -1123,7 +1300,7 @@ export default function ChatInterface() {
           )}
           
           <AnimatePresence initial={false}>
-            {messages.map((msg) => (
+            {messages.filter(m => !(isLoading && streamingContent && m.role === 'model' && m.content === "")).map((msg) => (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
@@ -1170,18 +1347,33 @@ export default function ChatInterface() {
                   )}
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 mb-2">
-                      {msg.attachments.map((att, i) => (
-                        <div key={i} className="relative group rounded-lg overflow-hidden border border-zinc-700 max-w-[200px]">
-                          {att.startsWith('data:image') ? (
-                            <img src={att} alt="Attachment" className="w-full h-auto max-h-40 object-cover" />
-                          ) : (
-                            <div className="p-3 bg-zinc-900 flex items-center gap-2">
-                              <FileIcon className="w-4 h-4 text-zinc-400" />
-                              <span className="text-xs text-zinc-300 truncate">File</span>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                      {msg.attachments.map((att, i) => {
+                        const isImage = att.startsWith('data:image');
+                        const isVideo = att.startsWith('data:video');
+                        const isAudio = att.startsWith('data:audio');
+                        const isPDF = att.startsWith('data:application/pdf');
+
+                        return (
+                          <div key={i} className="relative group rounded-lg overflow-hidden border border-zinc-700 max-w-[200px] bg-zinc-950">
+                            {isImage ? (
+                              <img src={att} alt="Attachment" className="w-full h-auto max-h-40 object-cover" />
+                            ) : isVideo ? (
+                              <video src={att} className="w-full h-auto max-h-40" controls />
+                            ) : isAudio ? (
+                              <div className="p-2 min-w-[150px]">
+                                <audio src={att} className="w-full h-8" controls />
+                              </div>
+                            ) : (
+                              <div className="p-3 bg-zinc-900 flex items-center gap-2">
+                                {isPDF ? <FileIcon className="w-4 h-4 text-red-400" /> : <FileIcon className="w-4 h-4 text-zinc-400" />}
+                                <span className="text-xs text-zinc-300 truncate">
+                                  {isPDF ? 'PDF Document' : 'Text File'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                   <div className="prose prose-invert max-w-none text-sm leading-relaxed prose-p:leading-relaxed prose-pre:p-0 prose-headings:tracking-tight prose-a:text-purple-400 prose-strong:text-zinc-100">
@@ -1319,31 +1511,102 @@ export default function ChatInterface() {
               <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center shrink-0 shadow-[0_0_15px_rgba(168,85,247,0.2)]">
                 <Bot className="w-5 h-5 text-purple-400 animate-pulse" />
               </div>
-              <div className="flex flex-col gap-1 flex-1">
+              <div className="flex flex-col gap-1 flex-1 min-w-0">
                 <div className="flex items-center gap-2 px-1">
                   <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">OmniAgent</span>
-                  <span className="text-[10px] text-zinc-600 animate-pulse">Processing...</span>
+                  <span className="text-[10px] text-zinc-600 animate-pulse">
+                    {streamingContent ? "Responding..." : "Processing..."}
+                  </span>
                 </div>
-                <div className="bg-zinc-900 border border-zinc-800/50 p-5 rounded-2xl flex items-center gap-3 shadow-xl">
-                  <div className="flex gap-1">
-                    <motion.div 
-                      animate={{ scale: [1, 1.2, 1] }} 
-                      transition={{ repeat: Infinity, duration: 1, delay: 0 }}
-                      className="w-1.5 h-1.5 rounded-full bg-purple-500" 
-                    />
-                    <motion.div 
-                      animate={{ scale: [1, 1.2, 1] }} 
-                      transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
-                      className="w-1.5 h-1.5 rounded-full bg-purple-500/60" 
-                    />
-                    <motion.div 
-                      animate={{ scale: [1, 1.2, 1] }} 
-                      transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
-                      className="w-1.5 h-1.5 rounded-full bg-purple-500/30" 
-                    />
-                  </div>
-                  <span className="text-sm text-zinc-400 font-medium">Synthesizing response...</span>
+                <div className={cn(
+                  "space-y-2 p-5 rounded-2xl relative shadow-xl",
+                  streamingContent ? "bg-zinc-900 border border-zinc-800/50" : "bg-zinc-900/50 border border-zinc-800/30"
+                )}>
+                  {!streamingContent ? (
+                    <div className="flex items-center gap-3">
+                      <div className="flex gap-1">
+                        <motion.div 
+                          animate={{ scale: [1, 1.2, 1] }} 
+                          transition={{ repeat: Infinity, duration: 1, delay: 0 }}
+                          className="w-1.5 h-1.5 rounded-full bg-purple-500" 
+                        />
+                        <motion.div 
+                          animate={{ scale: [1, 1.2, 1] }} 
+                          transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
+                          className="w-1.5 h-1.5 rounded-full bg-purple-500/60" 
+                        />
+                        <motion.div 
+                          animate={{ scale: [1, 1.2, 1] }} 
+                          transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
+                          className="w-1.5 h-1.5 rounded-full bg-purple-500/30" 
+                        />
+                      </div>
+                      <span className="text-sm text-zinc-400 font-medium">Synthesizing response...</span>
+                    </div>
+                  ) : (
+                    <div className="prose prose-invert max-w-none text-sm leading-relaxed prose-p:leading-relaxed prose-pre:p-0 prose-headings:tracking-tight prose-a:text-purple-400 prose-strong:text-zinc-100">
+                      <ReactMarkdown
+                        components={{
+                          h1: ({ children }) => <h1 className="text-xl font-bold mt-8 mb-4 text-white tracking-tight border-b border-zinc-800 pb-2">{children}</h1>,
+                          h2: ({ children }) => <h2 className="text-lg font-bold mt-6 mb-3 text-zinc-100 tracking-tight">{children}</h2>,
+                          h3: ({ children }) => <h3 className="text-base font-bold mt-5 mb-2 text-zinc-200 tracking-tight">{children}</h3>,
+                          p: ({ children }) => <p className="mb-4 text-zinc-300 leading-relaxed last:mb-0">{children}</p>,
+                          ul: ({ children }) => <ul className="list-disc pl-6 mb-4 space-y-2 text-zinc-300 marker:text-purple-500/50">{children}</ul>,
+                          ol: ({ children }) => <ol className="list-decimal pl-6 mb-4 space-y-2 text-zinc-300 marker:text-purple-500/50">{children}</ol>,
+                          li: ({ children }) => <li className="pl-1 leading-relaxed">{children}</li>,
+                          code(props) {
+                            const { children, className, node, ...rest } = props;
+                            const match = /language-(\w+)/.exec(className || '');
+                            const codeContent = String(children).replace(/\n$/, '');
+                            
+                            return match ? (
+                              <div className="relative group my-6">
+                                <div className="flex items-center justify-between px-4 py-2 bg-zinc-950 border-x border-t border-zinc-800 rounded-t-xl">
+                                  <div className="flex items-center gap-2">
+                                    <div className="flex gap-1">
+                                      <div className="w-2.5 h-2.5 rounded-full bg-zinc-800" />
+                                      <div className="w-2.5 h-2.5 rounded-full bg-zinc-800" />
+                                      <div className="w-2.5 h-2.5 rounded-full bg-zinc-800" />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest ml-2">{match[1]}</span>
+                                  </div>
+                                </div>
+                                <SyntaxHighlighter
+                                  PreTag="div"
+                                  language={match[1]}
+                                  style={vscDarkPlus}
+                                  customStyle={{
+                                    margin: 0,
+                                    borderRadius: '0 0 0.75rem 0.75rem',
+                                    background: '#09090b',
+                                    border: '1px solid #27272a',
+                                    padding: '1.5rem',
+                                    fontSize: '0.85rem',
+                                    lineHeight: '1.6'
+                                  }}
+                                >
+                                  {codeContent}
+                                </SyntaxHighlighter>
+                              </div>
+                            ) : (
+                              <code {...rest} className={cn("bg-zinc-800/50 border border-zinc-700/50 px-1.5 py-0.5 rounded text-purple-300 font-mono text-[0.8em]", className)}>
+                                {children}
+                              </code>
+                            );
+                          }
+                        }}
+                      >
+                        {streamingContent}
+                      </ReactMarkdown>
+                      <motion.span 
+                        animate={{ opacity: [0, 1, 0] }}
+                        transition={{ repeat: Infinity, duration: 0.8 }}
+                        className="inline-block w-1.5 h-4 ml-1 bg-purple-500 align-middle"
+                      />
+                    </div>
+                  )}
                 </div>
+                {streamingMetadata && <GroundingMetadata metadata={streamingMetadata} />}
               </div>
             </motion.div>
           )}
@@ -1355,27 +1618,83 @@ export default function ChatInterface() {
         <div className="relative max-w-4xl mx-auto">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2 p-2 bg-zinc-900/50 border border-zinc-800 rounded-xl">
-              {attachments.map((att, i) => (
-                <div key={i} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-zinc-700 shrink-0">
-                  {att.type.startsWith('image/') ? (
-                    <img src={att.preview} alt="Preview" className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full bg-zinc-800 flex items-center justify-center">
-                      <FileIcon className="w-6 h-6 text-zinc-500" />
+              {attachments.map((att, i) => {
+                const isImage = att.type.startsWith('image/');
+                const isVideo = att.type.startsWith('video/');
+                const isAudio = att.type.startsWith('audio/');
+                const isPDF = att.type === 'application/pdf';
+
+                return (
+                  <div key={i} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-zinc-700 shrink-0 bg-zinc-800">
+                    {isImage ? (
+                      <img src={att.preview} alt="Preview" className="w-full h-full object-cover" />
+                    ) : isVideo ? (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <Video className="w-6 h-6 text-blue-400" />
+                      </div>
+                    ) : isAudio ? (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <Mic className="w-6 h-6 text-green-400" />
+                      </div>
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        {isPDF ? <FileIcon className="w-6 h-6 text-red-400" /> : <FileIcon className="w-6 h-6 text-zinc-500" />}
+                      </div>
+                    )}
+                    <button 
+                      onClick={() => removeAttachment(i)}
+                      className="absolute top-0.5 right-0.5 text-red-500 bg-black/50 rounded-full hover:text-red-400 transition-colors z-10"
+                    >
+                      <XCircle className="w-4 h-4" />
+                    </button>
+                    <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white truncate px-1 py-0.5">
+                      {att.file.name}
                     </div>
-                  )}
-                  <button 
-                    onClick={() => removeAttachment(i)}
-                    className="absolute top-0.5 right-0.5 text-red-500 bg-black/50 rounded-full hover:text-red-400 transition-colors"
-                  >
-                    <XCircle className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           )}
           <div className="absolute -top-12 left-0 right-0 flex justify-center gap-2 pointer-events-none">
-            {/* Quick Actions */}
+            <AnimatePresence>
+              {input.trim() && (
+                <>
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                    className="pointer-events-auto"
+                  >
+                    <Button
+                      onClick={openImageModal}
+                      variant="secondary"
+                      size="sm"
+                      className="h-8 rounded-full bg-zinc-900/80 backdrop-blur-md border border-zinc-800 text-[10px] font-bold uppercase tracking-widest gap-2 hover:bg-zinc-800 hover:border-purple-500/50 transition-all shadow-xl"
+                    >
+                      <ImageIcon className="w-3 h-3 text-purple-400" />
+                      Generate Image
+                    </Button>
+                  </motion.div>
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                    transition={{ delay: 0.05 }}
+                    className="pointer-events-auto"
+                  >
+                    <Button
+                      onClick={openVideoModal}
+                      variant="secondary"
+                      size="sm"
+                      className="h-8 rounded-full bg-zinc-900/80 backdrop-blur-md border border-zinc-800 text-[10px] font-bold uppercase tracking-widest gap-2 hover:bg-zinc-800 hover:border-blue-400/50 transition-all shadow-xl"
+                    >
+                      <Video className="w-3 h-3 text-blue-400" />
+                      Generate Video
+                    </Button>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
           </div>
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-2 shadow-2xl focus-within:border-purple-500/50 transition-all">
             <div className="flex items-end gap-2">
@@ -1386,7 +1705,7 @@ export default function ChatInterface() {
                   onChange={handleFileChange} 
                   className="hidden" 
                   multiple
-                  accept="image/*,application/pdf,text/*"
+                  accept="image/*,video/*,audio/*,application/pdf,text/*,.csv,.json"
                 />
                 <Button 
                   variant="ghost" 
@@ -1430,10 +1749,29 @@ export default function ChatInterface() {
                     handleSend();
                   }
                 }}
-                placeholder="Message OmniAgent..."
+                placeholder={isListening ? "Listening..." : "Message OmniAgent..."}
                 className="flex-1 bg-transparent border-none focus:ring-0 resize-none py-3 px-2 text-sm max-h-32 min-h-[44px]"
                 rows={1}
               />
+              {isListening && interimTranscript && (
+                <div className="absolute left-12 right-12 bottom-full mb-2 p-3 bg-zinc-900/90 backdrop-blur-xl border border-purple-500/30 rounded-xl shadow-2xl animate-in fade-in slide-in-from-bottom-2">
+                  <div className="flex items-center gap-3">
+                    <div className="flex gap-1">
+                      {[0, 1, 2].map(i => (
+                        <motion.div
+                          key={i}
+                          className="w-1 h-3 bg-purple-500 rounded-full"
+                          animate={{ height: [4, 12, 4] }}
+                          transition={{ duration: 0.5, repeat: Infinity, delay: i * 0.1 }}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-xs text-zinc-300 italic truncate">
+                      {interimTranscript}
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="flex flex-col items-center gap-1 mb-1">
                 {input.length > 0 && (
                   <span className={cn(
@@ -1510,15 +1848,9 @@ export default function ChatInterface() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Model</label>
-                <Select value={imageModel} onValueChange={setImageModel}>
-                  <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-xl">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
-                    <SelectItem value={MODELS.IMAGE_PRO}>Imagen 3 Pro</SelectItem>
-                    <SelectItem value={MODELS.IMAGE_FLASH}>Imagen 3 Flash</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="h-10 px-4 flex items-center bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-300">
+                  Imagen 3 Pro (Hyperrealistic)
+                </div>
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Format</label>
@@ -1632,17 +1964,12 @@ export default function ChatInterface() {
               />
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-4 gap-4">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Model</label>
-                <Select value={videoModel} onValueChange={setVideoModel}>
-                  <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-xl">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
-                    {VIDEO_MODELS.map(m => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <div className="h-10 px-4 flex items-center bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-300">
+                  Veo Pro
+                </div>
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Aspect Ratio</label>
@@ -1663,6 +1990,17 @@ export default function ChatInterface() {
                   </SelectTrigger>
                   <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
                     {VIDEO_RESOLUTIONS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">FPS</label>
+                <Select value={videoFps.toString()} onValueChange={(v) => setVideoFps(parseInt(v))}>
+                  <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
+                    {VIDEO_FPS.map(f => <SelectItem key={f} value={f.toString()}>{f} FPS</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
