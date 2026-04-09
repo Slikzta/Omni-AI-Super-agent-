@@ -9,6 +9,8 @@ import { TooltipProvider } from './components/ui/tooltip';
 
 import ErrorBoundary from './components/ErrorBoundary';
 
+import { UIProvider } from './contexts/UIContext';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('chat');
 
@@ -30,12 +32,14 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <TooltipProvider>
-        <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
-          {renderContent()}
-        </Layout>
-        <Toaster position="top-right" theme="dark" />
-      </TooltipProvider>
+      <UIProvider>
+        <TooltipProvider>
+          <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
+            {renderContent()}
+          </Layout>
+          <Toaster position="top-right" theme="dark" />
+        </TooltipProvider>
+      </UIProvider>
     </ErrorBoundary>
   );
 }

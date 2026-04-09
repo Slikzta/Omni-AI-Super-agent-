@@ -260,7 +260,7 @@ interface FirestoreErrorInfo {
   }
 }
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null, silent = false) {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -280,11 +280,39 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     path
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  
+  const rawError = errInfo.error.toLowerCase();
+  let friendlyMsg = "Database error occurred.";
+  
+  if (rawError.includes('permission') || rawError.includes('insufficient')) {
+    friendlyMsg = "Access Denied: You don't have permission for this action.";
+  } else if (rawError.includes('quota')) {
+    friendlyMsg = "Quota Exceeded: Database usage limit reached.";
+  } else if (rawError.includes('offline')) {
+    friendlyMsg = "Connection Error: You appear to be offline.";
+  }
+
+  if (silent) {
+    toast.error(friendlyMsg);
+    return;
+  }
+  
   throw new Error(JSON.stringify(errInfo));
 }
 
+import { useUI } from '../contexts/UIContext';
+
 export default function ChatInterface() {
   const [user] = useAuthState(auth);
+  const { 
+    isSidebarOpen, setIsSidebarOpen, toggleSidebar,
+    isImageModalOpen, setIsImageModalOpen,
+    isVideoModalOpen, setIsVideoModalOpen,
+    isClearDialogOpen, setIsClearDialogOpen,
+    isParamsOpen, setIsParamsOpen, toggleParams,
+    isRenaming, setIsRenaming
+  } = useUI();
+
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -298,14 +326,11 @@ export default function ChatInterface() {
   // Session Management State
   const [sessionId, setSessionId] = useState("global-session");
   const [sessionTitle, setSessionTitle] = useState("Neural Chat");
-  const [isRenaming, setIsRenaming] = useState(false);
   const [newTitle, setNewTitle] = useState("");
-  const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [isMultiTurn, setIsMultiTurn] = useState(true);
   const [selectedPersonaId, setSelectedPersonaId] = useState('omni');
   const [selectedModelId, setSelectedModelId] = useState<string>(MODELS.CHAT_PRO);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sessions, setSessions] = useState<{ id: string; title: string; timestamp: any }[]>([]);
 
   // Model Parameters
@@ -313,13 +338,11 @@ export default function ChatInterface() {
   const [topP, setTopP] = useState(0.9);
   const [topK, setTopK] = useState(40);
 
-  // Animate settings icon when parameters change
   useEffect(() => {
     setIsSettingsAnimating(true);
     const timer = setTimeout(() => setIsSettingsAnimating(false), 1000);
     return () => clearTimeout(timer);
   }, [temperature, topP, topK]);
-  const [isParamsOpen, setIsParamsOpen] = useState(false);
   const [isSettingsAnimating, setIsSettingsAnimating] = useState(false);
   const [streamingContent, setStreamingContent] = useState<string>('');
   const [streamingMetadata, setStreamingMetadata] = useState<any>(null);
@@ -340,7 +363,6 @@ export default function ChatInterface() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Image Generation Modal State
-  const [isImageModalOpen, setIsImageModalOpen] = useState(false);
   const [imagePrompt, setImagePrompt] = useState('');
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
@@ -351,7 +373,6 @@ export default function ChatInterface() {
   const [imageFormat, setImageFormat] = useState<string>("image/png");
   
   // Video Generation Modal State
-  const [isVideoModalOpen, setIsVideoModalOpen] = useState(false);
   const [videoPrompt, setVideoPrompt] = useState('');
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
@@ -659,7 +680,7 @@ export default function ChatInterface() {
     if (!user || !sessionId) return;
 
     const sessionDocRef = doc(db, `users/${user.uid}/sessions/${sessionId}`);
-    const unsubscribe = onSnapshot(sessionDocRef, (docSnap) => {
+    const unsubscribe = onSnapshot(sessionDocRef, async (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setSessionTitle(data.title || "Neural Chat");
@@ -670,7 +691,11 @@ export default function ChatInterface() {
         if (data.topK !== undefined) setTopK(data.topK);
       } else {
         // Initialize session doc if it doesn't exist
-        setDoc(sessionDocRef, { title: "Neural Chat", createdAt: serverTimestamp() }, { merge: true });
+        try {
+          await setDoc(sessionDocRef, { title: "Neural Chat", createdAt: serverTimestamp() }, { merge: true });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/sessions/${sessionId}`, true);
+        }
       }
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, `users/${user.uid}/sessions/${sessionId}`);
@@ -719,8 +744,7 @@ export default function ChatInterface() {
       setSessionId(newSession.id);
       toast.success("New chat created");
     } catch (error) {
-      console.error("Create session error:", error);
-      toast.error("Failed to create new chat");
+      handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/sessions`);
     }
   };
 
@@ -734,8 +758,7 @@ export default function ChatInterface() {
       }
       toast.success("Session deleted");
     } catch (error) {
-      console.error("Delete error:", error);
-      toast.error("Failed to delete session");
+      handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/sessions/${id}`);
     }
   };
 
@@ -748,8 +771,7 @@ export default function ChatInterface() {
       setIsRenaming(false);
       toast.success("Session renamed");
     } catch (error) {
-      console.error("Rename error:", error);
-      toast.error("Failed to rename session");
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/sessions/${sessionId}`);
     }
   };
 
@@ -766,8 +788,7 @@ export default function ChatInterface() {
       setIsClearDialogOpen(false);
       toast.success("Chat history cleared");
     } catch (error) {
-      console.error("Clear chat error:", error);
-      toast.error("Failed to clear chat history");
+      handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/sessions/${sessionId}/messages`);
     } finally {
       setIsClearing(false);
     }
@@ -798,7 +819,11 @@ export default function ChatInterface() {
 
     try {
       // Save user message
-      await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), userMessage);
+      try {
+        await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), userMessage);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/sessions/${sessionId}/messages`);
+      }
 
       // Call Gemini with streaming
       const ai = getGeminiAI();
@@ -878,24 +903,33 @@ export default function ChatInterface() {
           chunkCount++;
           // Update Firestore every 5 chunks to reduce overhead
           if (chunkCount % 5 === 0) {
-            await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
-              content: fullContent,
-              groundingMetadata: metadata
-            });
+            try {
+              await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
+                content: fullContent,
+                groundingMetadata: metadata
+              });
+            } catch (error) {
+              handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/sessions/${sessionId}/messages/${aiMessageRef.id}`, true);
+            }
           }
         }
       }
 
       // Final update to Firestore
-      await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
-        content: fullContent,
-        groundingMetadata: streamingMetadata
-      });
+      try {
+        await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
+          content: fullContent,
+          groundingMetadata: streamingMetadata
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/sessions/${sessionId}/messages/${aiMessageRef.id}`, true);
+      }
       
       setStreamingContent("");
       setStreamingMetadata(null);
     } catch (error) {
       console.error("Chat error:", error);
+      toast.error("Failed to get AI response");
     } finally {
       setIsLoading(false);
     }
@@ -1016,7 +1050,7 @@ export default function ChatInterface() {
               size="icon" 
               variant="ghost" 
               className="h-8 w-8 text-zinc-500" 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              onClick={toggleSidebar}
             >
               <Sidebar className="w-4 h-4" />
             </Button>
@@ -1135,7 +1169,7 @@ export default function ChatInterface() {
           <Button 
             variant="ghost" 
             size="sm" 
-            onClick={() => setIsParamsOpen(!isParamsOpen)}
+            onClick={toggleParams}
             className={cn(
               "gap-2 transition-all duration-300", 
               isParamsOpen ? "text-purple-400 bg-purple-400/10" : "text-zinc-500",
