@@ -6,6 +6,7 @@ import LiveVoice from './components/LiveVoice';
 import Integrations from './components/Integrations';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -38,6 +39,7 @@ export default function App() {
             {renderContent()}
           </Layout>
           <Toaster position="top-right" theme="dark" />
+          <SpeedInsights />
         </TooltipProvider>
       </UIProvider>
     </ErrorBoundary>
